@@ -1,4 +1,4 @@
 {
   "outputDirectory": "public",
-  "functions": { "api/**/*.js": { "maxDuration": 30 } }
+  "functions": { "api/dl.js": { "maxDuration": 30 } }
 }
