@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FastShare</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1f4;--ink:#14213d;--mute:#5b6678;--line:#cfd6df;--hot:#2f5bff;--card:#fff;--ok:#1a8f5a}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1624;--ink:#e8edf6;--mute:#98a3b8;--line:#2a3550;--hot:#6f8cff;--card:#172034;--ok:#4cc38a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Bricolage Grotesque",system-ui,sans-serif;line-height:1.45}
+main{max-width:900px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) 16px 200px}
+h1{font-size:clamp(1.8rem,6vw,2.8rem);font-weight:800;letter-spacing:-.03em;margin:20px 0 4px}
+.sub{color:var(--mute);margin:0 0 20px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}
+button{font:inherit;font-weight:600;background:var(--hot);color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button.danger{background:transparent;color:#d6336c;border:1px solid var(--line)}
+button.sm{padding:5px 10px;font-size:.85rem}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--hot);outline-offset:2px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.crumbs{display:flex;gap:4px;flex-wrap:wrap;margin:0 0 12px;font-weight:600}
+.crumbs a{color:var(--hot);cursor:pointer;text-decoration:none}
+.crumbs span{color:var(--mute)}
+.sel{background:var(--ink);color:var(--bg);border-radius:10px;padding:8px 12px;margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sel button{background:transparent;color:inherit;border:1px solid currentColor}
+.list{overflow:hidden}
+.row{display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row .nm{overflow-wrap:anywhere;font-weight:600;cursor:default}
+.row .nm.dir{cursor:pointer;color:var(--hot)}
+.row small{display:block;color:var(--mute);font-weight:400}
+.row .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.tag{display:inline-block;font-size:.75rem;color:var(--ok);border:1px solid var(--ok);border-radius:99px;padding:0 8px;margin-left:6px;font-weight:600;vertical-align:middle}
+.empty{padding:36px 16px;text-align:center;color:var(--mute)}
+.list.over{outline:2px dashed var(--hot);outline-offset:-2px}
+.login{padding:28px;text-align:center}
+#tx{position:fixed;left:0;right:0;bottom:0;max-height:38vh;overflow:auto;background:var(--card);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom));display:none}
+#tx .t{margin:6px auto;max-width:900px;font-size:.9rem}
+#tx .t div.pb{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:3px}
+#tx .t div.pb i{display:block;height:100%;width:0;background:var(--hot);transition:width .2s}
+#tx .t.done i{background:var(--ok)} #tx .t.fail i{background:#d6336c}
+#tx .t span{color:var(--mute)}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);padding:20px;max-width:90vw}
+dialog select{font:inherit;width:100%;padding:8px;margin:12px 0;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px}
+.err{color:#d6336c;margin:8px 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div id="tx" aria-live="polite"></div>
+<dialog id="mv"><b>Move to</b><select id="mvsel"></select>
+  <div class="bar" style="margin:0"><button id="mvgo">Move here</button><button class="ghost" id="mvno">Cancel</button></div></dialog>
+<input type="file" id="fi" multiple hidden>
+<input type="file" id="di" webkitdirectory multiple hidden>
+<script>
+const PART = 32 * 1024 * 1024;
+const UP_FILES = 3, UP_PAR = 8;
+const DL_PAR = 12, DL_CHUNK = 16 * 1024 * 1024;
+const $ = id => document.getElementById(id);
+const fmt = b => b > 1e9 ? (b/1e9).toFixed(2)+" GB" : b > 1e6 ? (b/1e6).toFixed(1)+" MB" : Math.ceil(b/1e3)+" KB";
+function h(tag, props, ...kids){
+  const e = document.createElement(tag);
+  for(const k in (props||{})){ if(k.startsWith("on")) e[k] = props[k]; else if(k === "class") e.className = props[k]; else if(props[k] !== false && props[k] != null) e.setAttribute(k, props[k]); }
+  kids.flat().forEach(c => c != null && e.append(c.nodeType ? c : document.createTextNode(c)));
+  return e;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function retry(fn, tries = 4){ for(let a=0;;a++){ try { return await fn(); } catch(e){ if(a >= tries-1) throw e; await sleep(400*2**a); } } }
+async function pool(n, limit, worker){ let next = 0; await Promise.all(Array.from({length: Math.min(limit, n)}, async () => { while(next < n){ const i = next++; await worker(i); } })); }
+function addTransfer(name){
+  $("tx").style.display = "block";
+  const lab = h("span", null, "waiting"), bar = h("i"), t = h("div", {class:"t"}, h("b", null, name, " "), lab, h("div", {class:"pb"}, bar));
+  $("tx").prepend(t);
+  return { set(p, s){ bar.style.width = Math.min(100, p) + "%"; lab.textContent = s; },
+    done(s){ t.classList.add("done"); bar.style.width = "100%"; lab.textContent = s || "done"; },
+    fail(s){ t.classList.add("fail"); lab.textContent = s; } };
+}
+let pw = sessionStorage.getItem("pw") || "";
+async function api(path, body){
+  for(let i=0;i<3;i++){
+    const r = await fetch(path, body === undefined ? {headers:{"x-password":pw}} :
+      {method:"POST", headers:{"Content-Type":"application/json","x-password":pw}, body: JSON.stringify(body)});
+    if(r.status === 401){
+      const v = prompt("Enter the owner password");
+      if(v === null) throw new Error("Password required");
+      pw = v; sessionStorage.setItem("pw", pw); continue;
+    }
+    const j = await r.json().catch(() => ({}));
+    if(!r.ok) throw new Error(j.error || ("Server error " + r.status));
+    return j;
+  }
+  throw new Error("Wrong password");
+}
+async function download(getInfo, name){
+  const t = addTransfer(name);
+  try {
+    let writable = null;
+    if(window.showSaveFilePicker){
+      const fh = await showSaveFilePicker({suggestedName: name});
+      writable = await fh.createWritable();
+    }
+    const f = await getInfo();
+    const n = Math.max(1, Math.ceil(f.size / DL_CHUNK)), parts = [];
+    let got = 0; const t0 = performance.now();
+    await pool(n, DL_PAR, async i => {
+      const a = i*DL_CHUNK, b = Math.min(f.size, a+DL_CHUNK) - 1;
+      const buf = await retry(async () => {
+        const res = await fetch(f.url, {headers:{Range:`bytes=${a}-${b}`}});
+        if(res.status !== 206 && res.status !== 200) throw new Error("Range failed: " + res.status);
+        return res.arrayBuffer();
+      });
+      got += buf.byteLength;
+      if(writable) await writable.write({type:"write", position:a, data:buf}); else parts[i] = buf;
+      t.set(got/f.size*100, Math.floor(got/f.size*100) + "% · " + (got/1e6/((performance.now()-t0)/1000)).toFixed(1) + " MB/s");
+    });
+    if(writable) await writable.close();
+    else { const el = document.createElement("a"); el.href = URL.createObjectURL(new Blob(parts)); el.download = f.name; el.click(); }
+    t.done("downloaded");
+  } catch(e){ t.fail(e.name === "AbortError" ? "cancelled" : "failed: " + e.message); }
+}
+const qs = new URLSearchParams(location.search);
+async function publicFile(id){
+  const app = $("app"); app.replaceChildren(h("h1", null, "FastShare"), h("p", {class:"sub"}, "Loading…"));
+  try {
+    const r = await fetch("/api/public?file=" + encodeURIComponent(id)), f = await r.json();
+    if(!r.ok) throw new Error(f.error);
+    app.replaceChildren(h("h1", null, f.name), h("p", {class:"sub"}, fmt(f.size) + " · original quality"),
+      h("button", {onclick: () => download(() => fetch("/api/public?file="+encodeURIComponent(id)).then(r => r.json()), f.name)}, "Download"));
+  } catch(e){ app.replaceChildren(h("h1", null, "Not available"), h("p", {class:"sub"}, e.message)); }
+}
+async function publicFolder(id){
+  const app = $("app"); app.replaceChildren(h("h1", null, "FastShare"), h("p", {class:"sub"}, "Loading…"));
+  try {
+    const r = await fetch("/api/public?folder=" + encodeURIComponent(id)), d = await r.json();
+    if(!r.ok) throw new Error(d.error);
+    const rows = [
+      ...d.folders.map(f => h("div", {class:"row"}, h("span"), h("div", {class:"nm dir", onclick: () => publicFolder(f.id)}, f.name + "/"), h("span"))),
+      ...d.files.map(f => h("div", {class:"row"}, h("span"),
+        h("div", {class:"nm"}, f.name, h("small", null, fmt(f.size))),
+        h("div", {class:"acts"}, h("button", {class:"sm", onclick: () => download(() => fetch("/api/public?file="+encodeURIComponent(f.id)).then(r => r.json()), f.name)}, "Download")))),
+    ];
+    app.replaceChildren(h("h1", null, d.name), h("p", {class:"sub"}, d.up ? h("a", {href:"#", onclick: e => { e.preventDefault(); publicFolder(d.up); }}, "Back") : "Shared folder"),
+      h("div", {class:"panel list"}, rows.length ? rows : h("div", {class:"empty"}, "This folder is empty.")));
+  } catch(e){ app.replaceChildren(h("h1", null, "Not available"), h("p", {class:"sub"}, e.message)); }
+}
+let meta = {folders:{}, files:{}}, cwd = null; const sel = new Set();
+let chain = Promise.resolve();
+const serial = fn => { const p = chain.then(fn); chain = p.catch(() => {}); return p; };
+const act = (action, extra) => serial(async () => { const r = await api("/api/action", {action, ...extra}); meta = r.meta; render(); return r; });
+function pathOf(id){ const o = []; while(id && meta.folders[id]){ o.unshift(meta.folders[id]); id = meta.folders[id].parent; } return o; }
+function pubState(kind, id){
+  const n = (kind === "file" ? meta.files : meta.folders)[id]; if(n.public) return "direct";
+  let p = kind === "file" ? n.folder : n.parent, g = 0;
+  while(p && meta.folders[p] && g++ < 200){ if(meta.folders[p].public) return "inherited"; p = meta.folders[p].parent; }
+  return null;
+}
+const linkFor = (kind, id) => location.origin + "/?" + (kind === "file" ? "f" : "d") + "=" + id;
+const items = () => [...sel].map(s => { const [kind, id] = s.split(":"); return {kind, id}; });
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, {numeric:true});
+function render(){
+  const app = $("app");
+  const folders = Object.values(meta.folders).filter(f => (f.parent||null) === cwd).sort(byName);
+  const files = Object.values(meta.files).filter(f => (f.folder||null) === cwd).sort(byName);
+  const crumbs = h("div", {class:"crumbs"}, h("a", {onclick: () => go(null)}, "Home"),
+    pathOf(cwd).map(f => [h("span", null, "/"), h("a", {onclick: () => go(f.id)}, f.name)]));
+  const row = (kind, n) => {
+    const key = kind + ":" + n.id, st = pubState(kind, n.id);
+    return h("div", {class:"row"},
+      h("input", {type:"checkbox", "aria-label":"Select " + n.name, checked: sel.has(key) ? "" : false, onchange: e => { e.target.checked ? sel.add(key) : sel.delete(key); render(); }}),
+      h("div", {class:"nm" + (kind === "folder" ? " dir" : ""), onclick: kind === "folder" ? () => go(n.id) : null},
+        n.name + (kind === "folder" ? "/" : ""), st ? h("span", {class:"tag"}, st === "direct" ? "Public" : "Public via folder") : null,
+        kind === "file" ? h("small", null, fmt(n.size)) : null),
+      h("div", {class:"acts"},
+        st ? h("button", {class:"ghost sm", onclick: async e => { await navigator.clipboard.writeText(linkFor(kind, n.id)); e.target.textContent = "Copied"; }}, "Copy link") : null,
+        kind === "file" ? h("button", {class:"ghost sm", onclick: () => download(() => api("/api/action", {action:"link", id:n.id}), n.name)}, "Download") : null,
+        h("button", {class:"ghost sm", onclick: () => { const v = prompt("New name", n.name); if(v) act("rename", {items:[{kind, id:n.id}], name:v}).catch(alert); }}, "Rename")));
+  };
+  const rows = [...folders.map(f => row("folder", f)), ...files.map(f => row("file", f))];
+  const list = h("div", {class:"panel list", id:"list"}, rows.length ? rows : h("div", {class:"empty"}, "Nothing here yet. Drop files or folders anywhere in this box, or use Upload."));
+  wireDrop(list);
+  const n = sel.size, mut = (value) => act("setPublic", {items: items(), value}).then(() => { sel.clear(); render(); }).catch(alert);
+  app.replaceChildren(
+    h("h1", null, "FastShare"), h("p", {class:"sub"}, "Your files, folders, and what's public."),
+    h("div", {class:"bar"},
+      h("button", {onclick: () => $("fi").click()}, "Upload files"),
+      h("button", {class:"ghost", onclick: () => $("di").click()}, "Upload folder"),
+      h("button", {class:"ghost", onclick: () => { const v = prompt("Folder name"); if(v) act("createFolder", {name:v, parent:cwd}).catch(alert); }}, "New folder")),
+    crumbs,
+    n ? h("div", {class:"sel"}, h("b", null, n + " selected"),
+      h("button", {class:"sm", onclick: () => mut(true)}, "Make public"), h("button", {class:"sm", onclick: () => mut(false)}, "Make private"),
+      h("button", {class:"sm", onclick: openMove}, "Move"),
+      h("button", {class:"sm", onclick: () => { if(confirm("Delete " + n + " item(s)? Folders delete everything inside.")) act("delete", {items: items()}).then(() => { sel.clear(); render(); }).catch(alert); }}, "Delete"),
+      h("button", {class:"sm", onclick: () => { sel.clear(); render(); }}, "Clear")) : null,
+    list);
+}
+function go(id){ cwd = id; sel.clear(); render(); }
+function openMove(){
+  const banned = new Set(items().filter(i => i.kind === "folder").flatMap(i => sub(i.id)));
+  const label = f => pathOf(f.id).map(x => x.name).join(" / ");
+  const opts = [h("option", {value:""}, "Home"), ...Object.values(meta.folders).filter(f => !banned.has(f.id)).sort((a,b) => label(a).localeCompare(label(b))).map(f => h("option", {value:f.id}, label(f)))];
+  $("mvsel").replaceChildren(...opts); $("mv").showModal();
+}
+function sub(id){ return [id, ...Object.values(meta.folders).filter(f => f.parent === id).flatMap(f => sub(f.id))]; }
+$("mvno").onclick = () => $("mv").close();
+$("mvgo").onclick = () => { $("mv").close(); act("move", {items: items(), to: $("mvsel").value || null}).then(() => { sel.clear(); render(); }).catch(alert); };
+function putPart(url, blob, onBytes){
+  return new Promise((ok, bad) => {
+    const x = new XMLHttpRequest(); let last = 0;
+    x.open("PUT", url);
+    x.upload.onprogress = e => { onBytes(e.loaded - last); last = e.loaded; };
+    x.onload = () => { if(x.status < 300) ok(x.getResponseHeader("ETag")); else { onBytes(-last); bad(new Error("Part failed: " + x.status)); } };
+    x.onerror = () => { onBytes(-last); bad(new Error("Network error")); };
+    x.send(blob);
+  });
+}
+const pathCache = new Map();
+function ensurePath(base, names){
+  let cur = Promise.resolve(base);
+  names.forEach((nm, i) => {
+    const key = base + "|" + names.slice(0, i+1).join("/");
+    if(!pathCache.has(key)){
+      const prev = cur;
+      pathCache.set(key, prev.then(async parent => {
+        const ex = Object.values(meta.folders).find(f => (f.parent||null) === (parent||null) && f.name === nm);
+        return ex ? ex.id : (await act("createFolder", {name:nm, parent})).folder.id;
+      }));
+    }
+    cur = pathCache.get(key);
+  });
+  return cur;
+}
+async function uploadOne(item, base){
+  const file = item.file, t = addTransfer((item.path.length ? item.path.join("/") + "/" : "") + file.name);
+  try {
+    const folder = await ensurePath(base, item.path);
+    const s = await api("/api/upload/start", {name:file.name, size:file.size, type:file.type});
+    const etags = new Array(s.urls.length); let sent = 0; const t0 = performance.now();
+    const tick = () => t.set(sent/Math.max(file.size,1)*100, Math.min(100, Math.floor(sent/Math.max(file.size,1)*100)) + "% · " + (sent/1e6/Math.max((performance.now()-t0)/1000, .001)).toFixed(1) + " MB/s");
+    await pool(s.urls.length, UP_PAR, async i => {
+      const blob = file.slice(i*s.partSize, (i+1)*s.partSize);
+      etags[i] = await retry(() => putPart(s.urls[i], blob, d => { sent += d; tick(); }));
+    });
+    t.set(100, "finishing");
+    await serial(async () => {
+      const r = await api("/api/upload/complete", {key:s.key, uploadId:s.uploadId, name:file.name, folder, parts: etags.map((ETag,i) => ({PartNumber:i+1, ETag}))});
+      meta = r.meta; render();
+    });
+    t.done("uploaded");
+  } catch(e){ t.fail("failed: " + e.message); }
+}
+function uploadMany(list){
+  if(!list.length) return;
+  pathCache.clear(); const base = cwd;
+  pool(list.length, UP_FILES, i => uploadOne(list[i], base));
+}
+$("fi").onchange = e => { uploadMany([...e.target.files].map(file => ({file, path:[]}))); e.target.value = ""; };
+$("di").onchange = e => {
+  uploadMany([...e.target.files].map(file => ({file, path: (file.webkitRelativePath || file.name).split("/").slice(0, -1)})));
+  e.target.value = "";
+};
+async function walk(entry, path, out){
+  if(entry.isFile){ out.push({file: await new Promise((r, j) => entry.file(r, j)), path}); return; }
+  const rd = entry.createReader(); let batch;
+  do { batch = await new Promise((r, j) => rd.readEntries(r, j)); for(const c of batch) await walk(c, [...path, entry.name], out); } while(batch.length);
+}
+function wireDrop(el){
+  el.ondragover = e => { e.preventDefault(); el.classList.add("over"); };
+  el.ondragleave = () => el.classList.remove("over");
+  el.ondrop = async e => {
+    e.preventDefault(); el.classList.remove("over");
+    const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+    const out = []; for(const en of entries) await walk(en, [], out);
+    uploadMany(out);
+  };
+}
+if(qs.get("f")) publicFile(qs.get("f"));
+else if(qs.get("d")) publicFolder(qs.get("d"));
+else (async () => {
+  try { meta = (await api("/api/library")).meta; render(); }
+  catch(e){ $("app").replaceChildren(h("h1", null, "FastShare"), h("div", {class:"panel login"}, h("p", null, e.message),
+    h("button", {onclick: () => location.reload()}, "Sign in"))); }
+})();
+</script>
+</body>
+</html>
