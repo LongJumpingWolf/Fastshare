@@ -1,46 +1,18 @@
-# FastShare: deploy on Vercel
+# FastShare (Catbox edition, v2)
 
-Multi-file and folder uploads, folders, per-item public sharing, parallel chunked transfers.
+Static site plus one tiny backup function. No accounts, no environment variables.
 
-## Storage
-- File bytes live in a private Cloudflare R2 bucket at `files/<id>/<name>`.
-- Folder metadata and public/private flags live in `_meta/index.json` in that bucket.
-- Vercel stores no file data; it runs the API that issues signed links.
+## Deploy on Vercel
+Unzip, push to GitHub, import in Vercel (Framework Preset: Other). Or run `npx vercel` in the folder. Open the site. Done.
 
-## Cloudflare R2 setup
-1. Create an R2 bucket.
-2. Create an R2 API token with Object Read & Write. Copy its access key, secret, and S3 endpoint (`https://<account-id>.r2.cloudflarestorage.com`).
-3. Configure bucket CORS:
-```json
-[
-  {
-    "AllowedOrigins": ["*"],
-    "AllowedMethods": ["GET", "PUT", "HEAD"],
-    "AllowedHeaders": ["*"],
-    "ExposeHeaders": ["ETag", "Content-Length", "Content-Range"],
-    "MaxAgeSeconds": 3600
-  }
-]
-```
-After deployment, replace `*` with your Vercel site URL.
-4. Set a lifecycle rule to abort incomplete multipart uploads after one day.
+## What it does
+- **Multi-select:** pick many files at once, upload whole folders, or drag them in. Tick items and use Select all.
+- **Big files:** anything over 190 MB is cut into byte-exact parts, uploaded in parallel (6 at a time), and rejoined on download with a single button. Nothing is re-encoded, and the joined size is checked.
+- **Temporary mode (Litterbox):** parts up to 950 MB, deleted after 1, 12, 24 or 72 hours. The share page shows the time left.
+- **Sharing:** select items > Share selected. The link holds the file list, so receivers need nothing from your browser.
 
-## Vercel environment variables
-Set these before using the app:
-- `S3_ENDPOINT`: R2 S3 endpoint
-- `S3_KEY`: R2 Access Key ID
-- `S3_SECRET`: R2 Secret Access Key
-- `S3_BUCKET`: bucket name
-- `S3_REGION`: `auto` for Cloudflare R2
-- `ADMIN_PASSWORD`: strong owner password
-
-Then redeploy. Keep the R2 bucket private and do not enable public bucket access.
-
-## Usage
-Open the site and enter the owner password. Upload files, upload folders, or drag files/folders into the library. Select items to make them public/private, move, rename, or delete. Public items receive shareable links.
-
-## Notes
-- 32 MB upload parts, 8 parallel parts per file, up to 3 files at once.
-- Chrome/Edge can stream downloads directly to disk. Safari/Firefox buffer downloads in memory, so very large files may fail.
-- Single-owner design: avoid simultaneous editing from multiple tabs because metadata is stored as one JSON object.
-- Selected files download one at a time. Folder ZIP downloads are not implemented.
+## Good to know
+- Your library is saved in your browser only. Use "Back up library".
+- Anyone with a link can open that file. "Remove" doesn't delete from Catbox.
+- Downloads read Catbox directly. If the browser blocks that, `/api/dl` relays it (Catbox hosts only). If both fail, each share page has "Download parts separately".
+- Chrome/Edge write the joined file straight to disk. Safari/Firefox build it in memory, so files over about 1 GB may fail there.
